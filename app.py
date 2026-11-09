@@ -9,12 +9,18 @@ from upstash_redis import Redis
 
 # ---------------- CONFIG ----------------
 PARQUET_URL = "https://huggingface.co/datasets/tfqdeadlo/Inddatainonefile/resolve/main/users_data.parquet"
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")  # Set this in Vercel Environment Variables!
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 
-# Using the DATA_ prefix from your Vercel/Upstash dashboard
+# This will check for BOTH the DATA_ prefix and the standard prefix
+REDIS_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("DATA_KV_REST_API_URL")
+REDIS_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("DATA_KV_REST_API_TOKEN")
+
+if not REDIS_URL:
+    print("WARNING: Redis URL not found in environment variables!")
+
 redis = Redis(
-    url=os.environ.get("DATA_KV_REST_API_URL", ""),
-    token=os.environ.get("DATA_KV_REST_API_TOKEN", ""),
+    url=REDIS_URL or "",
+    token=REDIS_TOKEN or "",
 )
 
 app = FastAPI(title="ICMR Darknet Terminal")
