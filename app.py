@@ -11,13 +11,13 @@ from upstash_redis import Redis
 PARQUET_URL = "https://huggingface.co/datasets/tfqdeadlo/Inddatainonefile/resolve/main/users_data.parquet"
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")  # Set this in Vercel Environment Variables!
 
-# FIXED: Using the DATA_ prefix as shown in your Vercel/Upstash dashboard
+# Using the DATA_ prefix from your Vercel/Upstash dashboard
 redis = Redis(
     url=os.environ.get("DATA_KV_REST_API_URL", ""),
     token=os.environ.get("DATA_KV_REST_API_TOKEN", ""),
 )
 
-app = FastAPI(title="Phone Search API")
+app = FastAPI(title="ICMR Darknet Terminal")
 
 # ---------------- DUCKDB INIT ----------------
 con = duckdb.connect()
@@ -33,7 +33,8 @@ except Exception as e:
 def make_key(days: int) -> str:
     key = "sk_" + secrets.token_urlsafe(24)
     expiry_dt = datetime.datetime.utcnow() + datetime.timedelta(days=days)
-    redis.set(f"key:{key}", expiry_dt.isoformat(), ex=days * 86400)
+    expiry_str = expiry_dt.isoformat()
+    redis.set(f"key:{key}", expiry_str, ex=days * 86400)
     return key
 
 def validate_key(key: str) -> bool:
@@ -46,7 +47,7 @@ def validate_key(key: str) -> bool:
 
 def check_admin(secret: str):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Unauthorized. Invalid ADMIN_SECRET.")
 
 def clean_records(df):
     """Cleans pandas NaN and numpy data types so FastAPI can serialize to JSON."""
@@ -71,29 +72,16 @@ async def search_by_phone(
     key: str = Query(..., description="Your API key"),
 ):
     if not validate_key(key):
-        raise HTTPException(status_code=401, detail="Invalid or expired API key")
+        raise HTTPException(status_code=401, detail="ACCESS_DENIED: Invalid or expired API key")
 
     query = f"SELECT * FROM read_parquet('{PARQUET_URL}') WHERE mobile = ? LIMIT 10"
     try:
         df = con.execute(query, [phone]).fetchdf()
         if df.empty:
-            return {"message": "No matching records found", "phone": phone}
+            return {"message": "NO_DATA_FOUND", "phone": phone}
         return clean_records(df)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
-
-# ---------------- SCHEMA DEBUG ----------------
-@app.get("/schema")
-async def schema(key: str = Query(...)):
-    if not validate_key(key):
-        raise HTTPException(status_code=401, detail="Invalid or expired API key")
-    try:
-        cols = con.execute(
-            f"DESCRIBE SELECT * FROM read_parquet('{PARQUET_URL}')"
-        ).fetchall()
-        return [{"name": c[0], "type": c[1]} for c in cols]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"QUERY_FAILED: {str(e)}")
 
 # ---------------- ADMIN API ----------------
 @app.post("/admin/generate")
@@ -111,10 +99,37 @@ async def list_keys(x_admin_secret: str = Header(...)):
     check_admin(x_admin_secret)
     try:
         keys = redis.keys("key:*")
-        return [
-            {"key": k.replace("key:", ""), "expires_at": redis.get(k)}
-            for k in keys
-        ]
+        result = []
+        now = datetime.datetime.utcnow()
+        
+        for k in keys:
+            expires_at_str = redis.get(k)
+            time_left = "Unknown"
+            
+            if expires_at_str:
+                try:
+                    # Handle possible quotes from JSON serialization
+                    if isinstance(expires_at_str, str):
+                        expires_at_str = expires_at_str.strip('"\'')
+                    
+                    expiry_dt = datetime.datetime.fromisoformat(expires_at_str)
+                    delta = expiry_dt - now
+                    
+                    if delta.total_seconds() > 0:
+                        days_left = delta.days
+                        hours_left = delta.seconds // 3600
+                        time_left = f"{days_left}d {hours_left}h"
+                    else:
+                        time_left = "Expired"
+                except Exception:
+                    time_left = "Invalid Date"
+            
+            result.append({
+                "key": k.replace("key:", ""), 
+                "expires_at": expires_at_str,
+                "time_left": time_left
+            })
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
 
@@ -125,9 +140,9 @@ async def revoke_key(
 ):
     check_admin(x_admin_secret)
     redis.delete(f"key:{key}")
-    return {"revoked": key}
+    return {"status": "REVOKED", "key": key}
 
-# ---------------- ADMIN PANEL (HTML) ----------------
+# ---------------- ADMIN PANEL (HACKER UI) ----------------
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel():
     return """
@@ -135,71 +150,179 @@ async def admin_panel():
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Admin Panel</title>
+  <title>ROOT@ADMIN:~#</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap" rel="stylesheet">
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; }
-    input, button { padding: 8px; margin: 4px 0; font-size: 14px; }
-    input[type=text], input[type=password] { width: 340px; max-width: 100%; }
-    pre { background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; font-size: 13px; word-break: break-all; }
-    th { background: #f0f0f0; }
-    .row { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
-    button { cursor: pointer; background: #0070f3; color: white; border: none; border-radius: 4px; }
-    button:hover { background: #005bb5; }
+    :root {
+      --bg: #0a0a0a;
+      --term-green: #00ff41;
+      --term-dark: #003b00;
+      --alert: #ff3333;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--term-green);
+      font-family: 'Fira Code', monospace;
+      margin: 0;
+      padding: 20px;
+      line-height: 1.5;
+      text-shadow: 0 0 5px rgba(0, 255, 65, 0.5);
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    .header {
+      border-bottom: 2px solid var(--term-green);
+      padding-bottom: 10px;
+      margin-bottom: 20px;
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: 2px;
+    }
+    .panel {
+      border: 1px solid var(--term-dark);
+      background: rgba(0, 59, 0, 0.1);
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 0 10px rgba(0, 255, 65, 0.1);
+      border-radius: 4px;
+    }
+    h3 { margin-top: 0; color: var(--term-green); font-size: 16px; }
+    input, button {
+      background: black;
+      color: var(--term-green);
+      border: 1px solid var(--term-green);
+      padding: 8px 12px;
+      font-family: 'Fira Code', monospace;
+      font-size: 14px;
+      outline: none;
+      transition: all 0.2s;
+    }
+    input:focus { box-shadow: 0 0 8px var(--term-green); }
+    button { cursor: pointer; font-weight: 600; margin-left: 5px; }
+    button:hover { background: var(--term-green); color: black; }
+    button.danger { border-color: var(--alert); color: var(--alert); text-shadow: 0 0 5px var(--alert); }
+    button.danger:hover { background: var(--alert); color: black; box-shadow: 0 0 8px var(--alert); }
+    .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    pre {
+      background: #000;
+      border: 1px solid var(--term-dark);
+      padding: 15px;
+      color: var(--term-green);
+      overflow-x: auto;
+      margin-top: 15px;
+    }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
+    th, td { border: 1px solid var(--term-dark); padding: 8px; text-align: left; word-break: break-all; }
+    th { background: rgba(0, 255, 65, 0.1); text-transform: uppercase; }
+    tr:hover { background: rgba(0, 255, 65, 0.05); }
+    .status-ok { color: #00ff41; }
+    .status-warn { color: #ffcc00; text-shadow: 0 0 5px #ffcc00; }
+    .status-err { color: var(--alert); text-shadow: 0 0 5px var(--alert); }
+    .key-text { color: #88ff88; }
+    /* Matrix typing cursor animation */
+    .cursor::after {
+      content: "█";
+      animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
   </style>
 </head>
 <body>
-  <h2>Admin Panel</h2>
+  <div class="container">
+    <div class="header">SYSTEM.ADMIN // ACCESS_GRANTED<span class="cursor"></span></div>
 
-  <div class="row">
-    <h3>Admin Secret</h3>
-    <input type="password" id="secret" placeholder="Enter ADMIN_SECRET" style="width:340px">
-  </div>
+    <div class="panel">
+      <h3>> AUTHENTICATE_ROOT</h3>
+      <div class="input-group">
+        <input type="password" id="secret" placeholder="Enter ADMIN_SECRET" style="width:300px" autocomplete="off">
+      </div>
+    </div>
 
-  <div class="row">
-    <h3>Generate API Key</h3>
-    <input type="number" id="days" value="7" min="1" max="365" style="width:80px"> days
-    <button onclick="genKey()">Generate</button>
-    <pre id="genOut"></pre>
-  </div>
+    <div class="panel">
+      <h3>> GENERATE_ACCESS_KEY</h3>
+      <div class="input-group">
+        <span>LIFESPAN:</span>
+        <input type="number" id="days" value="7" min="1" max="365" style="width:80px"> <span>DAYS</span>
+        <button onclick="genKey()">EXECUTE</button>
+      </div>
+      <pre id="genOut" style="display:none;"></pre>
+    </div>
 
-  <div class="row">
-    <h3>List Keys</h3>
-    <button onclick="listKeys()">Refresh</button>
-    <div id="listOut"></div>
+    <div class="panel">
+      <h3>> ACTIVE_KEYS_DATABASE</h3>
+      <button onclick="listKeys()">REFRESH_QUERY</button>
+      <div id="listOut"></div>
+    </div>
   </div>
 
   <script>
     function secret() { return document.getElementById('secret').value; }
 
     async function genKey() {
+      if (!secret()) { alert("ROOT ACCESS REQUIRED. ENTER SECRET."); return; }
       const days = document.getElementById('days').value;
+      const btn = event.target;
+      btn.innerText = "EXECUTING...";
+      
       const r = await fetch(`/admin/generate?days=${days}`, {
         method: 'POST',
         headers: { 'x-admin-secret': secret() }
       });
-      document.getElementById('genOut').textContent = await r.text();
+      
+      btn.innerText = "EXECUTE";
+      const outBox = document.getElementById('genOut');
+      outBox.style.display = 'block';
+      
+      if (!r.ok) {
+        outBox.innerHTML = `<span class="status-err">ERROR: ${await r.text()}</span>`;
+        return;
+      }
+      
+      const data = await r.json();
+      outBox.innerHTML = `
+        <div class="status-ok">[+] KEY_GENERATED_SUCCESSFULLY</div>
+        <br>
+        <b>KEY:</b> <span class="key-text">${data.key}</span><br>
+        <b>EXPIRES:</b> ${data.expires_at}<br>
+      `;
       listKeys();
     }
 
     async function listKeys() {
-      const r = await fetch('/admin/list', { headers: { 'x-admin-secret': secret() } });
-      if (!r.ok) { document.getElementById('listOut').textContent = await r.text(); return; }
-      const data = await r.json();
-      if (!data || data.length === 0) { document.getElementById('listOut').innerHTML = '<p>No keys.</p>'; return; }
+      if (!secret()) { return; }
+      const out = document.getElementById('listOut');
+      out.innerHTML = '<span class="status-warn">Fetching records from Redis...</span>';
       
-      let html = '<table><tr><th>Key</th><th>Expires At (UTC)</th><th>Action</th></tr>';
+      const r = await fetch('/admin/list', { headers: { 'x-admin-secret': secret() } });
+      
+      if (!r.ok) { 
+        out.innerHTML = `<span class="status-err">ACCESS_DENIED: ${await r.text()}</span>`; 
+        return; 
+      }
+      
+      const data = await r.json();
+      if (!data || data.length === 0) { 
+        out.innerHTML = '<span class="status-warn">NO_ACTIVE_KEYS_FOUND</span>'; 
+        return; 
+      }
+      
+      let html = '<table><tr><th>Access Key</th><th>Expires In</th><th>Action</th></tr>';
       for (const k of data) {
-        html += `<tr><td>${k.key}</td><td>${k.expires_at || ''}</td>
-          <td><button onclick="revoke('${k.key}')">Revoke</button></td></tr>`;
+        let timeClass = "status-ok";
+        if (k.time_left === "Expired") timeClass = "status-err";
+        else if (k.time_left.includes("0d")) timeClass = "status-warn";
+
+        html += `<tr>
+          <td class="key-text">${k.key}</td>
+          <td class="${timeClass}">${k.time_left}</td>
+          <td><button class="danger" onclick="revoke('${k.key}')">TERMINATE</button></td>
+        </tr>`;
       }
       html += '</table>';
-      document.getElementById('listOut').innerHTML = html;
+      out.innerHTML = html;
     }
 
     async function revoke(key) {
-      if (!confirm('Are you sure you want to revoke this key?')) return;
+      if (!confirm('WARNING: PURGE KEY? THIS ACTION IS IRREVERSIBLE.')) return;
       await fetch(`/admin/revoke?key=${encodeURIComponent(key)}`, {
         method: 'DELETE',
         headers: { 'x-admin-secret': secret() }
@@ -217,7 +340,8 @@ async def admin_panel():
 @app.get("/")
 async def root():
     return {
-        "message": "Phone Search API is running.",
-        "search_endpoint": "/search?phone=...&key=...",
-        "admin_panel": "/admin",
+        "status": "ONLINE",
+        "message": "Search endpoint is active.",
+        "auth": "API Key Required",
+        "admin_portal": "/admin"
     }
