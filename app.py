@@ -9,14 +9,15 @@ from upstash_redis import Redis
 
 # ---------------- CONFIG ----------------
 PARQUET_URL = "https://huggingface.co/datasets/tfqdeadlo/Inddatainonefile/resolve/main/users_data.parquet"
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")  # set in Vercel env vars!
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")  # Set this in Vercel Environment Variables!
 
+# FIXED: Using the DATA_ prefix as shown in your Vercel/Upstash dashboard
 redis = Redis(
-    url=os.environ.get("KV_REST_API_URL", ""),
-    token=os.environ.get("KV_REST_API_TOKEN", ""),
+    url=os.environ.get("DATA_KV_REST_API_URL", ""),
+    token=os.environ.get("DATA_KV_REST_API_TOKEN", ""),
 )
 
-app = FastAPI(title="ICMR Phone Search API")
+app = FastAPI(title="Phone Search API")
 
 # ---------------- DUCKDB INIT ----------------
 con = duckdb.connect()
@@ -48,6 +49,7 @@ def check_admin(secret: str):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 def clean_records(df):
+    """Cleans pandas NaN and numpy data types so FastAPI can serialize to JSON."""
     records = df.to_dict(orient="records")
     out = []
     for r in records:
@@ -55,7 +57,7 @@ def clean_records(df):
         for k, v in r.items():
             if isinstance(v, float) and math.isnan(v):
                 clean[k] = None
-            elif hasattr(v, "item"):  # numpy scalar -> python
+            elif hasattr(v, "item"):  # numpy scalar -> python native
                 clean[k] = v.item()
             else:
                 clean[k] = v
@@ -107,11 +109,14 @@ async def generate_key(
 @app.get("/admin/list")
 async def list_keys(x_admin_secret: str = Header(...)):
     check_admin(x_admin_secret)
-    keys = redis.keys("key:*")
-    return [
-        {"key": k.replace("key:", ""), "expires_at": redis.get(k)}
-        for k in keys
-    ]
+    try:
+        keys = redis.keys("key:*")
+        return [
+            {"key": k.replace("key:", ""), "expires_at": redis.get(k)}
+            for k in keys
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
 
 @app.delete("/admin/revoke")
 async def revoke_key(
@@ -132,14 +137,16 @@ async def admin_panel():
   <meta charset="utf-8">
   <title>Admin Panel</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; }
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; }
     input, button { padding: 8px; margin: 4px 0; font-size: 14px; }
-    input[type=text], input[type=password] { width: 340px; }
-    pre { background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; }
+    input[type=text], input[type=password] { width: 340px; max-width: 100%; }
+    pre { background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; font-size: 13px; }
+    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; font-size: 13px; word-break: break-all; }
     th { background: #f0f0f0; }
     .row { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
+    button { cursor: pointer; background: #0070f3; color: white; border: none; border-radius: 4px; }
+    button:hover { background: #005bb5; }
   </style>
 </head>
 <body>
@@ -180,8 +187,9 @@ async def admin_panel():
       const r = await fetch('/admin/list', { headers: { 'x-admin-secret': secret() } });
       if (!r.ok) { document.getElementById('listOut').textContent = await r.text(); return; }
       const data = await r.json();
-      if (!data.length) { document.getElementById('listOut').innerHTML = '<p>No keys.</p>'; return; }
-      let html = '<table><tr><th>Key</th><th>Expires At (UTC)</th><th></th></tr>';
+      if (!data || data.length === 0) { document.getElementById('listOut').innerHTML = '<p>No keys.</p>'; return; }
+      
+      let html = '<table><tr><th>Key</th><th>Expires At (UTC)</th><th>Action</th></tr>';
       for (const k of data) {
         html += `<tr><td>${k.key}</td><td>${k.expires_at || ''}</td>
           <td><button onclick="revoke('${k.key}')">Revoke</button></td></tr>`;
@@ -191,6 +199,7 @@ async def admin_panel():
     }
 
     async function revoke(key) {
+      if (!confirm('Are you sure you want to revoke this key?')) return;
       await fetch(`/admin/revoke?key=${encodeURIComponent(key)}`, {
         method: 'DELETE',
         headers: { 'x-admin-secret': secret() }
@@ -209,6 +218,6 @@ async def admin_panel():
 async def root():
     return {
         "message": "Phone Search API is running.",
-        "search": "/search?phone=...&key=...",
+        "search_endpoint": "/search?phone=...&key=...",
         "admin_panel": "/admin",
     }
